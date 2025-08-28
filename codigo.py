@@ -12,10 +12,13 @@ caminho_bases = os.path.join(os.path.dirname(__file__), "bases")
 
 # 2. Lista todos os arquivos presentes na pasta 'bases'
 arquivos = os.listdir(caminho_bases)
-print(arquivos)  # Exibe os arquivos encontrados para conferência
+# print(arquivos)  # Exibe os arquivos encontrados para conferência
 
 # 3. Cria um DataFrame vazio para consolidar os dados de todos os arquivos CSV
 tabela_consolidada = pd.DataFrame()
+
+# 3a. Variável para soma geral
+soma_geral = 0
 
 # 4. Percorre cada arquivo CSV encontrado na pasta 'bases'
 for nome_arquivo in arquivos:
@@ -25,6 +28,19 @@ for nome_arquivo in arquivos:
     tabela_vendas["Data de Venda"] = pd.to_datetime("01/01/1900") + pd.to_timedelta(
         tabela_vendas["Data de Venda"], unit="d"
     )
+    # 4.2a Exibe o DataFrame lido para conferência cada ciclo do loop
+    print(f"\nArquivo: {nome_arquivo}")
+    print(tabela_vendas)
+    # 4.2b Soma por data para o arquivo atual
+    if "Transação" in tabela_vendas.columns:
+        soma_por_data = tabela_vendas.groupby("Data de Venda")["Transação"].sum()
+        print("Soma da coluna Transação por data:")
+        print(soma_por_data)
+        # 4.2c Soma geral acumulada
+        soma_geral += tabela_vendas["Transação"].sum()
+    else:
+        print("Coluna 'Transação' não encontrada neste arquivo.")
+
     # 4.3 Adiciona os dados lidos ao DataFrame consolidado
     tabela_consolidada = pd.concat([tabela_consolidada, tabela_vendas])
 
