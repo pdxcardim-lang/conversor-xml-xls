@@ -1,3 +1,46 @@
+# ============================
+# Arquivos sensíveis pessoais
+# ============================
 Vendas.xlsx
 .email_address
 .senha_email
+cef_Extrato.pdf.pdf
+*.ofx
+
+# ============================
+# Python
+# ============================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribuição / pacotes
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Ambientes virtuais
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+
+# ============================
+# Logs
+# ============================
+*.log
+
+# ============================
+# VS Code
+# ============================
+.vscode/
+.history/
+
+# ============================
+# Windows
+# ============================
+Thumbs.db
+ehthumbs.db
+Desktop.ini
