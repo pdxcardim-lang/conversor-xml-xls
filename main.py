@@ -1,16 +1,13 @@
 # ==========================================================
-# SCRIPT COMPLETO: Extrato OFX/PDF → Excel
-# Autor: ChatGPT + Jac (colaboração incremental)
-# Data da última atualização: 19/09/2025
-#
-# Funcionalidades:
-#   ✅ Importa múltiplos arquivos OFX/PDF
-#   ✅ Evita duplicação (FITID no OFX, Data+NrDoc+MEMO no PDF)
-#   ✅ Lançamento manual via formulário Tkinter
-#   ✅ Opção de desfazer execução
-#   ✅ Aba LOG_PROCESSAMENTO para registrar execuções
-#   ✅ Aba BANCOS com saldos consolidados por banco/conta
-#   ✅ Impressão no console do nome dos arquivos processados
+# SCRIPT COMPLETÃO: Processar OFX/PDF e salvar em Excel
+# Inclui:
+#   - Importação múltipla de arquivos OFX/PDF
+#   - Prevenção de duplicação (FITID no OFX, Data+NrDoc+MEMO no PDF)
+#   - Lançamento manual via formulário (Entrada/Saída)
+#   - Função desfazer execução
+#   - Aba LOG_PROCESSAMENTO com rastreio por FITID
+#   - Aba BANCOS com saldos consolidados
+#   - Menu gráfico inicial
 # ==========================================================
 # Requisitos:
 #   pip install ofxtools openpyxl pdfplumber
@@ -25,7 +22,7 @@ from datetime import datetime
 import logging
 import pdfplumber
 import re
-import uuid
+import time
 
 # ==========================================================
 # Configuração do LOG externo
@@ -38,6 +35,9 @@ logging.basicConfig(
     encoding="utf-8"
 )
 
+# ==========================================================
+# Helpers
+# ==========================================================
 def safe_get(obj, attr, default=None):
     """Evita KeyError / AttributeError ao acessar atributos"""
     try:
@@ -63,6 +63,7 @@ def parse_valor(valor_str: str) -> float:
     return valor
 
 def parse_pdf(caminho_pdf):
+    """Extrai lançamentos de um extrato PDF da CEF"""
     dados = []
     padrao = re.compile(r"(\d{2}/\d{2}/\d{4})\s+(\S+)?\s+(.*?)\s+([\d\.,]+ [CD])\s+([\d\.,]+ [CD])")
 
@@ -97,99 +98,111 @@ def desfazer_execucao(caminho_excel):
     ws = wb.active
     exec_num = simpledialog.askinteger("Desfazer Execução", "Digite o número da execução para remover:")
     if exec_num is None:
-        messagebox.showinfo("Cancelado", "Nenhuma execução foi informada.")
         return
     linhas_removidas = 0
     for row in list(ws.iter_rows(min_row=2)):
         if row[7].value == exec_num:  # Execução está na coluna Execução
             ws.delete_rows(row[0].row, 1)
             linhas_removidas += 1
-    if linhas_removidas == 0:
-        messagebox.showwarning("Aviso", f"Nenhuma linha encontrada para a execução {exec_num}.")
-    else:
+    if linhas_removidas > 0:
         wb.save(caminho_excel)
-        messagebox.showinfo("Sucesso", f"Foram removidas {linhas_removidas} linhas da execução {exec_num}.")
+        messagebox.showinfo("Sucesso", f"Execução {exec_num} desfeita ({linhas_removidas} linhas).")
         logging.info(f"Execução {exec_num} desfeita. Linhas removidas: {linhas_removidas}")
-
-# ==========================================================
-# Função: atualizar aba de bancos
-# ==========================================================
-def atualizar_bancos(wb, ws):
-    if "BANCOS" in wb.sheetnames:
-        ws_bancos = wb["BANCOS"]
-        ws_bancos.delete_rows(2, ws_bancos.max_row)  # limpa os dados antigos
     else:
-        ws_bancos = wb.create_sheet("BANCOS")
-        ws_bancos.append(["Banco", "Conta", "Saldo Final (R$)"])
+        messagebox.showwarning("Aviso", f"Nenhuma linha encontrada para a execução {exec_num}.")
 
-    saldos = {}
+# ==========================================================
+# Função: atualizar aba BANCOS
+# ==========================================================
+def atualizar_aba_bancos(wb, ws):
+    bancos = {}
     for row in ws.iter_rows(min_row=2, values_only=True):
-        if row and row[0]:  # Data preenchida
-            banco, conta, saldo = row[5], row[6], row[4]
-            chave = (banco, conta)
-            saldos[chave] = saldo  # pega sempre o último saldo
+        if row and row[5] and row[4] is not None:
+            chave = (row[5], row[6])  # Banco ID + Processado em
+            bancos[chave] = row[4]
 
-    total = 0
-    for (banco, conta), saldo in saldos.items():
-        ws_bancos.append([banco, conta, saldo])
-        total += saldo
-
-    ws_bancos.append(["TOTAL GERAL", "", total])
+    if "BANCOS" in wb.sheetnames:
+        wb.remove(wb["BANCOS"])
+    ws_bancos = wb.create_sheet("BANCOS")
+    ws_bancos.append(["Banco ID", "Conta/Ref", "Saldo Final"])
+    for (banco_id, conta), saldo in bancos.items():
+        ws_bancos.append([banco_id, conta, saldo])
+    ws_bancos.append(["", "TOTAL", sum(bancos.values())])
 
 # ==========================================================
-# Função: importar OFX/PDF
+# Criar/abrir planilha
 # ==========================================================
-def importar_ofx_pdf(saida):
-    caminhos = filedialog.askopenfilenames(
-        title="Selecione um ou mais arquivos OFX ou PDF",
-        filetypes=[("Arquivos OFX/PDF", "*.ofx *.pdf"), ("Todos os arquivos", "*.*")]
-    )
-    if not caminhos:
-        messagebox.showerror("Erro", "Nenhum arquivo foi selecionado.")
-        return
-
+def carregar_planilha(saida):
     if os.path.exists(saida):
         wb = openpyxl.load_workbook(saida)
         ws = wb.active
-        execucoes = [int(row[7]) for row in ws.iter_rows(min_row=2, values_only=True) if row and isinstance(row[7], int)]
+        execucoes = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            try:
+                if row and row[7] is not None:
+                    execucoes.append(int(row[7]))
+            except (ValueError, TypeError):
+                continue
         ultima_execucao = max(execucoes) if execucoes else 0
+        execucao_atual = ultima_execucao + 1
     else:
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Extrato OFX"
         cabecalho = [
             "Data", "Tipo (Entrada/Saída)", "Descrição", "Valor (R$)", "Saldo acumulado (R$)",
-            "Banco ID", "Conta", "Execução", "TRNTYPE", "Nr. Documento", "MEMO", "FITID"
+            "Banco ID", "Processado em", "Execução", "TRNTYPE", "Nr. Documento", "MEMO", "FITID"
         ]
         ws.append(cabecalho)
-        ultima_execucao = 0
+        execucao_atual = 1
+    return wb, ws, execucao_atual
 
+# ==========================================================
+# Função: importar múltiplos arquivos
+# ==========================================================
+def atualizar():
+    arquivos = filedialog.askopenfilenames(
+        title="Selecione arquivos OFX ou PDF",
+        filetypes=[("Arquivos OFX/PDF", "*.ofx *.pdf")]
+    )
+    if not arquivos:
+        return
+
+    saida = os.path.join(os.path.dirname(arquivos[0]), "extrato_ofx.xlsx")
+    wb, ws, execucao_atual = carregar_planilha(saida)
+
+    # Aba de log
     if "LOG_PROCESSAMENTO" in wb.sheetnames:
         ws_log = wb["LOG_PROCESSAMENTO"]
     else:
         ws_log = wb.create_sheet("LOG_PROCESSAMENTO")
         ws_log.append([
             "Data Processamento", "Arquivo", "Banco", "Conta", "Execução",
-            "Adicionados", "Ignorados", "Entradas (R$)", "Saídas (R$)", "Saldo Final (R$)", "Status"
+            "Adicionados", "Ignorados", "Entradas (R$)", "Saídas (R$)", "Saldo Final (R$)", "FITID", "Status"
         ])
 
-    for caminho_arquivo in caminhos:
-        print(f"📂 Processando arquivo: {os.path.basename(caminho_arquivo)}")
-        execucao_atual = ultima_execucao + 1
-        ultima_execucao = execucao_atual
+    fitids_existentes = set()
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if row:
+            if row[-1]:  # FITID
+                fitids_existentes.add(str(row[-1]))
+            elif row[-2]:  # MEMO
+                chave = f"{row[0]}-{row[-3]}-{row[-2]}"
+                fitids_existentes.add(chave)
 
-        processados, ignorados, saldo = 0, 0, 0
+    total_processados, total_ignorados = 0, 0
+    saldo = 0
+
+    for caminho_arquivo in arquivos:
+        processados, ignorados = 0, 0
         data_processo = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
-        fitids_existentes = set(r[-1] for r in ws.iter_rows(min_row=2, values_only=True) if r and r[-1])
-
         if caminho_arquivo.lower().endswith(".ofx"):
-            # ---- Modo OFX ----
+            # ---- OFX ----
             tree = OFXTree()
             tree.parse(caminho_arquivo)
             ofx = tree.convert()
-            stmt = None
-            transacoes = []
+            stmt, transacoes = None, []
             if safe_get(ofx, "bankmsgsrsv1"):
                 statements = safe_get(ofx.bankmsgsrsv1, "statements")
                 if statements and len(statements) > 0:
@@ -200,9 +213,6 @@ def importar_ofx_pdf(saida):
                 if ccstatement:
                     stmt = ccstatement[0].ccstmtrs
                     transacoes = safe_get(stmt, "banktranlist", [])
-            if not transacoes:
-                messagebox.showerror("Erro", "Não foi possível localizar lançamentos neste OFX.")
-                continue
 
             banco_id = safe_get(safe_get(stmt, "bankacctfrom"), "bankid", "N/A")
             account_id = safe_get(safe_get(stmt, "bankacctfrom"), "acctid", "N/A")
@@ -222,16 +232,16 @@ def importar_ofx_pdf(saida):
                 nr_doc = ""
                 data = trn.dtposted.strftime("%d/%m/%Y")
 
-                ws.append([data, tipo, descricao, valor, saldo, banco_id, account_id, execucao_atual, trntype, nr_doc, memo, fitid])
+                ws.append([data, tipo, descricao, valor, saldo, banco_id, data_processo,
+                           execucao_atual, trntype, nr_doc, memo, fitid])
                 processados += 1
                 if fitid:
                     fitids_existentes.add(fitid)
 
         else:
-            # ---- Modo PDF ----
+            # ---- PDF ----
             dados = parse_pdf(caminho_arquivo)
-            banco_id, account_id = "CEF", "N/A"
-
+            banco_id, account_id, account_type = "CEF", "N/A", "N/A"
             for data_mov, nr_doc, historico, valor, saldo_mov in dados:
                 chave = f"{data_mov}-{nr_doc}-{historico}"
                 if chave in fitids_existentes:
@@ -241,117 +251,134 @@ def importar_ofx_pdf(saida):
                 tipo = "Entrada" if valor > 0 else "Saída"
                 trntype = "CREDIT" if valor > 0 else "DEBIT"
                 memo = historico
-                fitid = f"MANUAL-{execucao_atual}-{uuid.uuid4().int>>96}"
+                fitid = f"PDF-{execucao_atual}-{int(time.time())}"
 
-                ws.append([data_mov, tipo, historico, valor, saldo, banco_id, account_id, execucao_atual, trntype, nr_doc, memo, fitid])
+                ws.append([data_mov, tipo, historico, valor, saldo, banco_id, data_processo,
+                           execucao_atual, trntype, nr_doc, memo, fitid])
                 processados += 1
                 fitids_existentes.add(chave)
 
-        # Registrar log
-        total_entradas = sum(r[3] for r in ws.iter_rows(min_row=2, values_only=True) if r and r[3] > 0)
-        total_saidas = sum(r[3] for r in ws.iter_rows(min_row=2, values_only=True) if r and r[3] < 0)
+        # Registrar log por arquivo
+        ws_log.append([data_processo, os.path.basename(caminho_arquivo),
+                       banco_id, account_id, execucao_atual,
+                       processados, ignorados,
+                       "", "", saldo, "", "OK"])
 
+        total_processados += processados
+        total_ignorados += ignorados
+
+    atualizar_aba_bancos(wb, ws)
+    wb.save(saida)
+
+    messagebox.showinfo("Processo concluído",
+                        f"Arquivos processados: {len(arquivos)}\n"
+                        f"Adicionados: {total_processados}\n"
+                        f"Ignorados: {total_ignorados}\n"
+                        f"Saldo final: {saldo:.2f}")
+
+# ==========================================================
+# Função: lançamento manual
+# ==========================================================
+def lancar_manual(saida):
+    wb, ws, execucao_atual = carregar_planilha(saida)
+
+    if "LOG_PROCESSAMENTO" in wb.sheetnames:
+        ws_log = wb["LOG_PROCESSAMENTO"]
+    else:
+        ws_log = wb.create_sheet("LOG_PROCESSAMENTO")
         ws_log.append([
-            data_processo,
-            os.path.basename(caminho_arquivo),
-            banco_id,
-            account_id,
-            execucao_atual,
-            processados,
-            ignorados,
-            round(total_entradas, 2),
-            round(total_saidas, 2),
-            round(saldo, 2),
-            "OK"
+            "Data Processamento", "Arquivo", "Banco", "Conta", "Execução",
+            "Adicionados", "Ignorados", "Entradas (R$)", "Saídas (R$)", "Saldo Final (R$)", "FITID", "Status"
         ])
 
-    atualizar_bancos(wb, ws)
-    wb.save(saida)
-    messagebox.showinfo("Processo concluído", f"Arquivos importados com sucesso para:\n{saida}")
+    top = tk.Toplevel()
+    top.title("Lançamento Manual")
 
-# ==========================================================
-# Função: lançamento manual via formulário
-# ==========================================================
-def lancamento_manual(saida):
-    if not os.path.exists(saida):
-        messagebox.showerror("Erro", "Planilha não encontrada! Importe um arquivo antes.")
-        return
+    tk.Label(top, text="Data (dd/mm/aaaa):").pack()
+    entry_data = tk.Entry(top)
+    entry_data.pack()
+    entry_data.insert(0, datetime.now().strftime("%d/%m/%Y"))
 
-    wb = openpyxl.load_workbook(saida)
-    ws = wb.active
-    execucoes = [int(row[7]) for row in ws.iter_rows(min_row=2, values_only=True) if row and isinstance(row[7], int)]
-    execucao_atual = max(execucoes) + 1 if execucoes else 1
+    var_tipo = tk.StringVar(value="Entrada")
+    tk.Radiobutton(top, text="Entrada", variable=var_tipo, value="Entrada").pack()
+    tk.Radiobutton(top, text="Saída", variable=var_tipo, value="Saída").pack()
+
+    tk.Label(top, text="Descrição:").pack()
+    entry_desc = tk.Entry(top)
+    entry_desc.pack()
+
+    tk.Label(top, text="Valor:").pack()
+    entry_valor = tk.Entry(top)
+    entry_valor.pack()
+
+    tk.Label(top, text="Banco ID:").pack()
+    entry_banco = tk.Entry(top)
+    entry_banco.pack()
+
+    tk.Label(top, text="Nr. Documento:").pack()
+    entry_nr_doc = tk.Entry(top)
+    entry_nr_doc.pack()
+
+    tk.Label(top, text="MEMO:").pack()
+    entry_memo = tk.Entry(top)
+    entry_memo.pack()
 
     def salvar():
-        data = entry_data.get()
+        nonlocal execucao_atual
+        data_mov = entry_data.get()
         tipo = var_tipo.get()
         descricao = entry_desc.get()
         valor = float(entry_valor.get())
+        banco_id = entry_banco.get()
         nr_doc = entry_nr_doc.get()
         memo = entry_memo.get()
+        data_processo = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        fitid = f"MANUAL-{execucao_atual}-{int(time.time())}"
 
-        saldo = sum(r[3] for r in ws.iter_rows(min_row=2, values_only=True) if r and isinstance(r[3], (int, float)))
+        saldo = 0
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if row and row[4]:
+                saldo = row[4]
         saldo += valor if tipo == "Entrada" else -valor
         trntype = "CREDIT" if tipo == "Entrada" else "DEBIT"
-        fitid = f"MANUAL-{execucao_atual}-{uuid.uuid4().int>>96}"
-        banco_id, account_id = "MANUAL", "N/A"
 
-        ws.append([data, tipo, descricao, valor if tipo == "Entrada" else -valor, saldo, banco_id, account_id, execucao_atual, trntype, nr_doc, memo, fitid])
-        atualizar_bancos(wb, ws)
+        ws.append([data_mov, tipo, descricao,
+                   valor if tipo == "Entrada" else -valor,
+                   saldo, banco_id, data_processo, execucao_atual,
+                   trntype, nr_doc, memo, fitid])
+
+        ws_log.append([
+            data_processo, "MANUAL", banco_id, "N/A",
+            execucao_atual, 1, 0,
+            valor if tipo == "Entrada" else 0,
+            valor if tipo == "Saída" else 0,
+            saldo, fitid, "OK"
+        ])
+
+        atualizar_aba_bancos(wb, ws)
         wb.save(saida)
-        messagebox.showinfo("Sucesso", "Lançamento manual adicionado!")
-        root.destroy()
+        messagebox.showinfo("Sucesso", "Lançamento manual adicionado com sucesso!")
+        top.destroy()
 
+    tk.Button(top, text="Salvar", command=salvar).pack()
+    top.mainloop()
+
+# ==========================================================
+# Menu gráfico
+# ==========================================================
+def menu_grafico(saida):
     root = tk.Tk()
-    root.title("Lançamento Manual")
+    root.title("Menu - Processamento Extratos")
 
-    tk.Label(root, text="Data (dd/mm/aaaa):").grid(row=0, column=0)
-    entry_data = tk.Entry(root)
-    entry_data.grid(row=0, column=1)
-
-    tk.Label(root, text="Tipo:").grid(row=1, column=0)
-    var_tipo = tk.StringVar(value="Entrada")
-    tk.Radiobutton(root, text="Entrada", variable=var_tipo, value="Entrada").grid(row=1, column=1, sticky="w")
-    tk.Radiobutton(root, text="Saída", variable=var_tipo, value="Saída").grid(row=1, column=2, sticky="w")
-
-    tk.Label(root, text="Descrição:").grid(row=2, column=0)
-    entry_desc = tk.Entry(root)
-    entry_desc.grid(row=2, column=1)
-
-    tk.Label(root, text="Valor:").grid(row=3, column=0)
-    entry_valor = tk.Entry(root)
-    entry_valor.grid(row=3, column=1)
-
-    tk.Label(root, text="Nr. Documento:").grid(row=4, column=0)
-    entry_nr_doc = tk.Entry(root)
-    entry_nr_doc.grid(row=4, column=1)
-
-    tk.Label(root, text="Memo:").grid(row=5, column=0)
-    entry_memo = tk.Entry(root)
-    entry_memo.grid(row=5, column=1)
-
-    tk.Button(root, text="Salvar", command=salvar).grid(row=6, column=0, columnspan=2)
+    tk.Button(root, text="📥 Atualizar (importar OFX/PDF)", command=atualizar, width=40).pack(pady=5)
+    tk.Button(root, text="✍️ Lançamento Manual", command=lambda: lancar_manual(saida), width=40).pack(pady=5)
+    tk.Button(root, text="⏪ Desfazer Execução", command=lambda: desfazer_execucao(saida), width=40).pack(pady=5)
+    tk.Button(root, text="❌ Sair", command=root.destroy, width=40).pack(pady=5)
 
     root.mainloop()
 
 # ==========================================================
-# Menu gráfico principal
+# Execução principal
 # ==========================================================
-def menu_grafico():
-    root = tk.Tk()
-    root.title("Gerenciador de Extratos")
-
-    saida = os.path.join(os.getcwd(), "extrato_ofx.xlsx")
-
-    tk.Button(root, text="📥 Importar OFX/PDF", command=lambda: importar_ofx_pdf(saida), width=40).pack(pady=5)
-    tk.Button(root, text="📝 Lançamento Manual", command=lambda: lancamento_manual(saida), width=40).pack(pady=5)
-    tk.Button(root, text="↩️ Desfazer Execução", command=lambda: desfazer_execucao(saida), width=40).pack(pady=5)
-    tk.Button(root, text="🚪 Sair", command=root.destroy, width=40).pack(pady=5)
-
-    root.mainloop()
-
-# ==========================================================
-# Execução
-# ==========================================================
-if __name__ == "__main__":
-    menu_grafico()
+saida = os.path.join(os.getcwd(), "extrato_ofx.xlsx")
+menu_grafico(saida)
